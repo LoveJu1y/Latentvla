@@ -9,8 +9,40 @@ from simpler_env.utils.env.env_builder import build_maniskill2_env, get_robot_co
 from simpler_env.utils.env.observation_utils import get_image_from_maniskill2_obs_dict
 from simpler_env.utils.visualization import write_video
 import logging
+import os
 
 logging.basicConfig(level=logging.DEBUG)
+
+# Auto-detect SimplerEnv_PATH
+SimplerEnv_PATH = os.environ.get("SimplerEnv_PATH")
+if not SimplerEnv_PATH:
+    # Try common paths
+    possible_paths = [
+        "/share/project/lvjing/SimplerEnv",
+        os.path.expanduser("~/Projects/SimplerEnv"),
+        os.path.expanduser("~/SimplerEnv"),
+    ]
+    for path in possible_paths:
+        if os.path.exists(path):
+            SimplerEnv_PATH = path
+            break
+
+if not SimplerEnv_PATH:
+    raise ValueError(
+        "SimplerEnv_PATH not found! Please set it as an environment variable or ensure SimplerEnv is installed in a standard location.\n"
+        "You can also download the data directory from: https://github.com/simpler-env/ManiSkill2_real2sim/tree/main/data"
+    )
+
+rgb_overlay_path = os.path.join(SimplerEnv_PATH, "ManiSkill2_real2sim/data/real_inpainting/bridge_sink.png")
+if not os.path.exists(rgb_overlay_path):
+    raise FileNotFoundError(
+        f"rgb_overlay_path not found: {rgb_overlay_path}\n"
+        f"If you installed this repo through 'pip install .', you can download the data directory from:\n"
+        f"https://github.com/simpler-env/ManiSkill2_real2sim/tree/main/data"
+    )
+
+print(f"📁 Using SimplerEnv_PATH: {SimplerEnv_PATH}")
+print(f"🖼️  Using rgb_overlay_path: {rgb_overlay_path}")
 
 env_name = "PutEggplantInBasketScene-v0"
 
@@ -23,7 +55,7 @@ kwargs = {
     "max_episode_steps": 120,
     "scene_name": "bridge_table_1_v2",
     "camera_cfgs": {"add_segmentation": True},
-    "rgb_overlay_path": "ManiSkill2_real2sim/data/real_inpainting/bridge_sink.png"
+    "rgb_overlay_path": rgb_overlay_path
 }
 
 additional_env_build_kwargs = {}

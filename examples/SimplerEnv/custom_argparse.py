@@ -118,6 +118,19 @@ def get_args():
     parser.add_argument("--async-freq", type=int, default=1)
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Octo init rng seed")
     parser.add_argument("--port", type=int, default=10093)
+    
+    # ECOT (Implicit Reasoning) parameters
+    parser.add_argument(
+        "--enable-latent-reasoning",
+        action="store_true",
+        help="Enable ECOT implicit reasoning with forward_latent (uses multi-pass forward with thinking tokens)"
+    )
+    parser.add_argument(
+        "--thinking-token-count",
+        type=int,
+        default=4,
+        help="Number of thinking tokens to insert (must match training config). Default: 4"
+    )
 
 
     args = parser.parse_args()

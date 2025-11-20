@@ -41,7 +41,7 @@ def main(args) -> None:
 
 def build_argparser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt_path", type=str, default="Qwen/Qwen2.5-VL-3B-Instruct")
+    parser.add_argument("--ckpt_path", type=str, default="Qwen/Qwen3-VL-2B-Instruct")
     parser.add_argument("--port", type=int, default=10093)
     parser.add_argument("--use_bf16", action="store_true")
     return parser

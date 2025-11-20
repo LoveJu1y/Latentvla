@@ -1,0 +1,263 @@
+# ============================================================================
+# ECoT Stage 2+ Full Training Configuration
+# ============================================================================
+# Purpose: Complete training configuration for ECoT implicit reasoning
+#          with thinking tokens and KV-Cache iterative forward
+#
+# Usage:
+#   python starVLA/training/train_ecot.py --config_yaml config/training/ecot_stage2_full.yaml
+#
+# Key Features:
+#   - ECoT RLDS data integration
+#   - Implicit reasoning with thinking tokens (Stage 2+)
+#   - VLM loss computation
+#   - Full QwenGR00T framework support
+# ============================================================================
+
+# ============================================================================
+# 1. 基础配置 (Basic Configuration)
+# ============================================================================
+run_id: "ecot_stage2_training"
+run_root_dir: "./outputs"
+seed: 42
+is_debug: false
+
+# ============================================================================
+# 2. 数据配置 (Dataset Configuration)
+# ============================================================================
+datasets:
+  vla_data:
+    # 数据集类型：使用 ECoT RLDS 数据
+    dataset_py: "ecot_rlds"
+    
+    # 批次和图像设置
+    per_device_batch_size: 16  # 每个设备的批次大小（根据GPU内存调整）
+    num_workers: 0  # DataLoader 工作进程数（0=单进程，>0=多进程）
+    image_size: [224, 224]  # 图像尺寸 [H, W]
+    
+    # ECoT RLDS 专属配置
+    ecot:
+      # 数据路径
+      data_root_dir: "/share/project/emllm_mnt.1d/mnt/sfs/baaiei/jyShi/rt_newData"  # RLDS 数据根目录
+      data_mix: "bridge"  # OXE 数据混合名称（如 "bridge", "bridge_rt_1" 等）
+      
+      # 阶段设置（Stage Configuration）
+      scheduled_stage: 0  # Stage 2+: 有 thinking tokens，使用 forward_latent
+                          # Stage 0: 无 thinking tokens，使用普通 forward
+                          # 注意：scheduled_stage 必须与 framework.enable_latent_reasoning 配合使用
+      
+      # Thinking Token 配置（仅 Stage 2+ 需要）
+      thinking_token_count: 2  # 每个 tag 默认插入的 thinking token 数量
+      tag2think_count:  # 每个 reasoning tag 对应的 thinking token 数量
+        TASK: 1
+        PLAN: 1
+        "VISIBLE OBJECTS": 1
+        "SUBTASK REASONING": 1
+        SUBTASK: 1
+        "MOVE REASONING": 1
+        MOVE: 1
+        "GRIPPER POSITION": 1
+      
+      # 动作配置（必须与 framework.action_model 对齐）
+      action_dim: 7  # 动作维度（7D: x, y, z, roll, pitch, yaw, gripper）
+      future_action_window_size: 15  # 未来动作窗口大小（必须与 framework.action_model 一致）
+      past_action_window_size: 0  # 过去动作窗口大小（必须与 framework.action_model 一致）
+      # chunk_len = past_action_window_size + 1 + future_action_window_size = 16
+      
+      # 数据处理配置
+      shuffle_buffer_size: 256000  # 数据 shuffle buffer 大小（根据内存调整：256k/128k/64k）
+      image_aug: false  # 图像增强（训练稳定后可设为 true）
+      load_proprio: true  # 是否加载本体感觉数据（proprioceptive state）
+      lower_case_instruction: true  # 是否将指令转为小写
+      train: true  # 是否为训练模式
+      
+      # Reasoning JSON 路径
+      reasoning_json: "/share/project/lvjing/datas/embodied_features_bridge.json"
+      # 如果文件不存在，Prismatic 会自动从 HuggingFace 拉取并缓存
+
+# ============================================================================
+# 3. 模型配置 (Framework Configuration)
+# ============================================================================
+framework:
+  name: "QwenGR00T"  # 框架名称（必须）
+  
+  # ========================================================================
+  # 3.1 隐式推理配置 (Implicit Reasoning Configuration)
+  # ========================================================================
+  enable_latent_reasoning: true  # 是否启用隐式推理
+                                 # true: 使用 forward_latent（KV-Cache 迭代 forward）
+                                 # false: 使用普通 forward
+  
+  latent_reasoning:
+    # VLM Loss 配置
+    compute_language_loss: true  # 是否计算 VLM 语言建模损失
+                                 # true: 计算 vlm_loss，合并到 total_loss
+                                 # false: 只使用 action_loss
+    
+    vlm_loss_weight: 0.2  # VLM loss 权重（范围建议：0.01-0.5）
+                          # total_loss = action_loss + vlm_loss_weight * vlm_loss
+                          # 如果 compute_language_loss=false，此参数无效
+    
+    # Thinking Token 定义（必须与 tokenizer 中添加的 tokens 一致）
+    thinking_token: "<|thinking|>"
+    start_of_thinking_token: "<|start_of_thinking|>"
+    end_of_thinking_token: "<|end_of_thinking|>"
+  
+  # ========================================================================
+  # 3.2 Qwen3-VL 配置 (Qwen3-VL Configuration)
+  # ========================================================================
+  qwenvl:
+    base_vlm: "Qwen/Qwen3-VL-2B-Instruct"  # Qwen3-VL 模型路径或 HuggingFace ID
+    attn_implementation: "flash_attention_2"  # 注意力实现方式
+                                 # "sdpa": PyTorch SDPA（推荐，兼容性好）
+                                 # "flash_attention_2": Flash Attention 2（需要安装，更快）
+    cache_dir: "./qwen_cache"  # 模型缓存目录
+    model_max_length: 2048  # 模型最大序列长度（根据 GPU 内存调整：2048/4096/8192）
+  # ========================================================================
+  # 3.3 Action Model 配置 (Action Model Configuration)
+  # ========================================================================
+  action_model:
+    # 模型类型
+    action_model_type: DiT-B  # Diffusion Transformer 模型类型
+    
+    # 基础参数
+    hidden_size: 1024  # 隐藏层维度（与 DiT 最后的 projection 对应，用于 ActionDecoder）
+    add_pos_embed: true  # 是否添加位置编码
+    max_seq_len: 1024  # 最大序列长度
+    
+    # 动作参数（必须与 datasets.vla_data.ecot 对齐）
+    action_dim: 7  # 动作维度
+    state_dim: 8  # 状态维度（Bridge dataset 使用 8 维，OXE 通常为 7 维）
+    future_action_window_size: 15  # 未来动作窗口（必须与 ecot.future_action_window_size 一致）
+    action_horizon: 16  # 动作预测范围（= past + 1 + future = 0 + 1 + 15 = 16）
+    past_action_window_size: 0  # 过去动作窗口（必须与 ecot.past_action_window_size 一致）
+    
+    # Diffusion 参数
+    noise_beta_alpha: 1.5  # Noise schedule alpha
+    noise_beta_beta: 1.0  # Noise schedule beta
+    noise_s: 0.999  # Noise schedule s
+    num_timestep_buckets: 1000  # 时间步 buckets 数量
+    num_inference_timesteps: 4  # 推理时的时间步数
+    num_target_vision_tokens: 32  # 目标视觉 token 数量
+    
+    # DiT Transformer 配置
+    diffusion_model_cfg:
+      cross_attention_dim: 1536  # Cross attention 维度（Qwen3-VL-2B hidden size，会自动设置）
+      dropout: 0.2  # Dropout 率
+      final_dropout: true  # 是否在最后添加 dropout
+      interleave_self_attention: true  # 是否交错 self attention
+      norm_type: "ada_norm"  # 归一化类型
+      num_layers: 16  # Transformer 层数
+      output_dim: 1024  # 输出维度
+      positional_embeddings: null  # 位置编码（null=使用默认）
+
+# ============================================================================
+# 4. 训练配置 (Trainer Configuration)
+# ============================================================================
+trainer:
+  # 训练步数和周期
+  max_train_steps: 10000  # 最大训练步数
+  epochs: null  # Epoch 数（如果设置，会覆盖 max_train_steps）
+  
+  # 梯度累积和优化器
+  gradient_accumulation_steps: 1  # 梯度累积步数（有效 batch size = per_device_batch_size * num_gpus * gradient_accumulation_steps）
+  gradient_clipping: 1.0  # 梯度裁剪阈值（防止梯度爆炸）
+  
+  # 学习率配置
+  learning_rate:
+    base: 1.0e-5  # 基础学习率
+    qwen_vl_interface: 1.0e-5  # Qwen3-VL 学习率（如果不同，会覆盖 base）
+    action_model: 5e-5  # Action Model 学习率（通常比 VLM 大）
+  
+  # 学习率调度器
+  lr_scheduler_type: "cosine_with_min_lr"  # 学习率调度器类型
+                                            # "constant": 恒定学习率
+                                            # "cosine": 余弦退火
+                                            # "cosine_with_min_lr": 带最小值的余弦退火（推荐）
+                                            # "linear": 线性衰减
+  num_warmup_steps: 0  # Warmup 步数
+  scheduler_specific_kwargs:
+    min_lr: 5.0e-7  # 最小学习率（用于 cosine_with_min_lr）
+  
+  # 优化器配置
+  optimizer:
+    name: AdamW  # 优化器名称
+    betas: [0.9, 0.95]  # Adam beta 参数
+    eps: 1.0e-8  # 数值稳定性参数
+    weight_decay: 1.0e-08  # 权重衰减（L2 正则化）
+  
+  # 模型冻结（可选）
+  freeze_modules: ""  # 要冻结的模块（逗号分隔，如 "qwenvl" 或 "" 表示不冻结）
+  
+  # Loss 权重（如果使用多任务训练）
+  loss_scale:
+    vla: 1.0  # VLA loss 权重
+    vlm: 0.1  # VLM loss 权重（如果启用）
+  
+  # Diffusion 相关
+  repeated_diffusion_steps: 4  # 重复 diffusion 步数（用于训练稳定性）
+  
+  # Checkpoint 和评估
+  save_interval: 2000  # 保存 checkpoint 的间隔（步数）
+  eval_interval: 500  # 评估间隔（步数）
+  
+  # 日志配置
+  logging_frequency: 10  # 日志记录频率（每 N 步记录一次）
+  
+  # 恢复训练（可选）
+  is_resume: false  # 是否从 checkpoint 恢复
+  pretrained_checkpoint: null  # 预训练 checkpoint 路径（可选）
+  resume_from_checkpoint: null  # 恢复训练的 checkpoint 路径（如果 is_resume=true）
+  reload_modules: null  # 要重新加载的模块（如 "action_model"）
+  
+  # 高级选项
+  enable_gradient_checkpointing: false  # 是否启用梯度检查点（节省内存，但增加计算时间）
+  enable_mixed_precision_training: true  # 是否启用混合精度训练（bfloat16）
+  
+  # ========================================================================
+  # 4.1 多阶段训练（可选，Curriculum Learning）
+  # ========================================================================
+  curriculum_learning:
+    enable: false  # 是否启用多阶段训练
+    stage_schedule:  # 阶段调度（step: stage）
+      0: 0  # Step 0 开始使用 Stage 0
+      # 1000: 1  # Step 1000 切换到 Stage 1
+      # 2000: 2  # Step 2000 切换到 Stage 2
+    # 注意：启用此功能需要实现动态 dataloader 重建
+
+# ============================================================================
+# 5. W&B 配置 (Weights & Biases Configuration)
+# ============================================================================
+wandb_project: "ecot_training"  # W&B 项目名称
+wandb_entity: null  # W&B 实体/团队（null=使用默认）
+
+# ============================================================================
+# 6. 配置说明和注意事项
+# ============================================================================
+# 
+# 关键配置对齐检查：
+# 1. datasets.vla_data.ecot.future_action_window_size 
+#    == framework.action_model.future_action_window_size
+# 2. datasets.vla_data.ecot.past_action_window_size 
+#    == framework.action_model.past_action_window_size
+# 3. datasets.vla_data.ecot.action_dim 
+#    == framework.action_model.action_dim
+# 4. datasets.vla_data.ecot.scheduled_stage 
+#    与 framework.enable_latent_reasoning 配合使用
+#    - Stage 0: enable_latent_reasoning 可以是 true/false（无 thinking tokens）
+#    - Stage 2+: enable_latent_reasoning 必须是 true（有 thinking tokens）
+#
+# 性能调优建议：
+# 1. per_device_batch_size: 根据 GPU 内存调整（2/4/8/16）
+# 2. model_max_length: 根据 GPU 内存调整（2048/4096/8192）
+# 3. shuffle_buffer_size: 根据系统内存调整（256k/128k/64k）
+# 4. num_workers: 根据 CPU 核心数调整（4/8/16）
+# 5. gradient_accumulation_steps: 如果 batch size 太小，可以增加此值
+#
+# VLM Loss 权重建议：
+# 1. 初始训练：vlm_loss_weight = 0.01-0.05（较小，避免干扰 action loss）
+# 2. 稳定后：vlm_loss_weight = 0.1-0.2（逐步增加）
+# 3. 如果 post-thinking 部分很短，可以设置 compute_language_loss = false
+#
+# ============================================================================
+

@@ -93,7 +93,7 @@ trainer:
   repeated_diffusion_steps: 4
   max_grad_norm: 1.0
   warmup_ratio: 0.1
-  weight_decay: 0.0
+  weight_decay: 0.0 #无用
   logging_frequency: 10
   gradient_clipping: 1.0
   gradient_accumulation_steps: 1

@@ -1,6 +1,20 @@
 debug/
 ckpts/
 third_party/
+coconut/
+
+# Log folders (evaluation logs)
+*_logs/
+*_logs_*/
+*_logs_semble*/
+*_logs_nosemble*/
+
+# Output folders (training outputs and checkpoints)
+outputs/
+outputs2/
+outputs*/
+qwen_cache/
+.cursor/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

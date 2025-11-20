@@ -76,8 +76,19 @@ def setup_directories(cfg) -> Path:
 
 def prepare_data(cfg, accelerator, output_dir) -> Tuple[DataLoader, DataLoader]:
     """prepare training data"""
-    logger.info(f"Creating VLA Dataset with Mixture `{cfg.datasets.vla_data.data_mix}`")
-    vla_train_dataloader = build_dataloader(cfg=cfg, dataset_py=cfg.datasets.vla_data.dataset_py)
+    # Safely extract data_mix for logging (could be in ecot.* or vla_data.*)
+    dataset_py = cfg.datasets.vla_data.dataset_py
+    try:
+        # Try to get data_mix from vla_data (LeRobot format)
+        data_mix = cfg.datasets.vla_data.data_mix
+    except (AttributeError, KeyError):
+        # For ECOT, data_mix is in ecot.*
+        try:
+            data_mix = cfg.datasets.vla_data.ecot.data_mix
+        except (AttributeError, KeyError):
+            data_mix = "unknown"
+    logger.info(f"Creating VLA Dataset with dataset_py=`{dataset_py}`, data_mix=`{data_mix}`")
+    vla_train_dataloader = build_dataloader(cfg=cfg, dataset_py=dataset_py)
 
     vlm_train_dataloader = build_dataloader(cfg=cfg, dataset_py=cfg.datasets.vlm_data.dataset_py)
 

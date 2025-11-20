@@ -14,8 +14,51 @@ import numpy as np
 from pathlib import Path
 
 
-from starVLA.model.tools import read_mode_config
-# from starVLA.model.framework.base_framework import baseframework
+# 独立的配置读取函数，避免导入训练模块
+def read_config_simple(checkpoint_path):
+    """
+    简化版的配置读取，只读取 norm_stats，不依赖训练模块
+    
+    Args:
+        checkpoint_path: 模型 checkpoint 路径 (.pt 文件)
+    
+    Returns:
+        tuple: (config_dict, norm_stats_dict)
+    """
+    import json
+    from pathlib import Path
+    
+    checkpoint_pt = Path(checkpoint_path)
+    if not checkpoint_pt.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    
+    # 获取 run 目录（checkpoint 的父目录的父目录）
+    run_dir = checkpoint_pt.parents[1]
+    
+    # 读取配置文件
+    config_yaml = run_dir / "config.yaml"
+    dataset_statistics_json = run_dir / "dataset_statistics.json"
+    
+    # 只读取 norm_stats（不需要加载完整配置）
+    if not dataset_statistics_json.exists():
+        raise FileNotFoundError(f"Missing dataset_statistics.json in {run_dir}")
+    
+    with open(dataset_statistics_json, "r") as f:
+        norm_stats = json.load(f)
+    
+    # config 可以返回 None（SimplerEnv 不需要）
+    config = None
+    if config_yaml.exists():
+        try:
+            # 尝试用 yaml 读取（避免 omegaconf 依赖）
+            import yaml
+            with open(config_yaml, "r") as f:
+                config = yaml.safe_load(f)
+        except:
+            # 如果没有 yaml 库或读取失败，返回 None
+            pass
+    
+    return config, norm_stats
 
 
 class M1Inference:
@@ -35,14 +78,44 @@ class M1Inference:
         adaptive_ensemble_alpha = 0.1,
         host="0.0.0.0",
         port=10093,
+        # ECOT (Implicit Reasoning) parameters
+        enable_latent_reasoning: bool = False,
+        thinking_token_count: int = 4,
     ) -> None:
         
         # build client to connect server policy
         self.client = WebsocketClientPolicy(host, port)
 
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
+        
+        # 如果没有指定 unnorm_key，尝试从 dataset_statistics.json 自动检测
+        if unnorm_key is None:
+            try:
+                _, norm_stats = read_config_simple(policy_ckpt_path)
+                available_keys = list(norm_stats.keys())
+                
+                # 根据 policy_setup 映射到实际的 key
+                key_mapping = {
+                    "widowx_bridge": ["oxe_bridge", "bridge_data_v2", "bridge"],
+                    "google_robot": ["oxe_rt1", "rt1", "fractal"],
+                }
+                
+                # 查找匹配的 key
+                for candidate in key_mapping.get(policy_setup, []):
+                    if candidate in available_keys:
+                        unnorm_key = candidate
+                        print(f"✅ Auto-detected unnorm_key: {unnorm_key} from available keys: {available_keys}")
+                        break
+                
+                # 如果没找到，使用第一个可用的 key
+                if unnorm_key is None and len(available_keys) > 0:
+                    unnorm_key = available_keys[0]
+                    print(f"⚠️ Using first available unnorm_key: {unnorm_key} from {available_keys}")
+            except Exception as e:
+                print(f"⚠️ Failed to auto-detect unnorm_key: {e}, falling back to default")
+                unnorm_key = "oxe_bridge" if policy_setup == "widowx_bridge" else "oxe_rt1"
+        
         if policy_setup == "widowx_bridge":
-            unnorm_key = "oxe_bridge" if unnorm_key is None else unnorm_key
             action_ensemble = action_ensemble
             adaptive_ensemble_alpha = adaptive_ensemble_alpha
             if action_ensemble_horizon is None:
@@ -50,7 +123,6 @@ class M1Inference:
                 action_ensemble_horizon = 7
             self.sticky_gripper_num_repeat = 1
         elif policy_setup == "google_robot":
-            unnorm_key = "oxe_rt1" if unnorm_key is None else unnorm_key
             action_ensemble = action_ensemble
             adaptive_ensemble_alpha = adaptive_ensemble_alpha
             if action_ensemble_horizon is None:
@@ -91,6 +163,34 @@ class M1Inference:
         self.num_image_history = 0
 
         self.action_norm_stats = self.get_action_stats(self.unnorm_key, policy_ckpt_path=policy_ckpt_path)
+        
+        # ECOT (Implicit Reasoning) initialization
+        self.enable_latent_reasoning = enable_latent_reasoning
+        self.thinking_token_count = thinking_token_count
+        
+        if self.enable_latent_reasoning:
+            # Define thinking token strings (must match training config)
+            self.thinking_tokens = {
+                "start": "<|start_of_thinking|>",
+                "thinking": "<|thinking|>",
+                "end": "<|end_of_thinking|>",
+            }
+            
+            # Pre-construct thinking sequence for efficiency
+            # Format: " <|start_of_thinking|> <|thinking|> <|thinking|> ... <|end_of_thinking|>"
+            # 构造 thinking sequence（与训练时格式保持一致，tokens之间无空格）
+            self.thinking_sequence = (
+                f" {self.thinking_tokens['start']}" +
+                self.thinking_tokens['thinking'] * self.thinking_token_count +
+                f"{self.thinking_tokens['end']}"
+            )
+            
+            print(f"[ECOT] Implicit reasoning enabled with {thinking_token_count} thinking tokens")
+            # Token 统计：1 (start) + N (thinking) + 1 (end)
+            print(f"[ECOT] Thinking sequence: {thinking_token_count} x <|thinking|> tokens inserted")
+        else:
+            self.thinking_tokens = None
+            self.thinking_sequence = None
         
 
     def _add_image_to_history(self, image: np.ndarray) -> None:
@@ -133,14 +233,23 @@ class M1Inference:
         # image: Image.Image = Image.fromarray(image)
 
         image = self._resize_image(image)
+        
+        # Construct instruction (with thinking tokens if ECOT is enabled)
+        instruction = self.task_description
+        if self.enable_latent_reasoning:
+            # Add @ delimiter + thinking token sequence
+            # Format: "Instruction @ <|start_of_thinking|> <|thinking|> ... <|end_of_thinking|>"
+            instruction = instruction + " @ " + self.thinking_sequence
+        
         vla_input = {
             "batch_images": [[image]],
-            "instructions": [self.task_description],
+            "instructions": [instruction],  # Extended instruction with thinking tokens (if enabled)
             "unnorm_key": self.unnorm_key,
             "do_sample": False,
             "cfg_scale": self.cfg_scale,
             "use_ddim": self.use_ddim,
             "num_ddim_steps": self.num_ddim_steps,
+            "use_iterative_forward": self.enable_latent_reasoning,  # Key flag for forward_latent
         }
         
         response = self.client.infer(vla_input)
@@ -225,7 +334,7 @@ class M1Inference:
         Duplicate stats accessor (retained for backward compatibility).
         """
         policy_ckpt_path = Path(policy_ckpt_path)
-        model_config, norm_stats = read_mode_config(policy_ckpt_path)  # read config and norm_stats
+        model_config, norm_stats = read_config_simple(policy_ckpt_path)  # 使用简化版读取函数
 
         # unnorm_key = baseframework._check_unnorm_key(norm_stats, unnorm_key) # 其实也是很环境 specific 的
         return norm_stats[unnorm_key]["action"]

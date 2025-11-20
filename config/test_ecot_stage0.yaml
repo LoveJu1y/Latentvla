@@ -1,0 +1,96 @@
+# ECoT Stage 0 Test Configuration
+# Purpose: Test pipeline without thinking tokens (only @ delimiter)
+
+# 基础配置
+run_id: "test_ecot_stage0"
+run_root_dir: "./test_outputs"
+seed: 42
+is_debug: false
+
+# 数据配置
+datasets:
+  vla_data:
+    dataset_py: "ecot_rlds"
+    per_device_batch_size: 2  # 保守设置
+    num_workers: 0  # 避免多进程问题
+    image_size: [224, 224]
+    ecot:
+      data_root_dir: "/share/project/emllm_mnt.1d/mnt/sfs/baaiei/jyShi/rt_newData"
+      data_mix: "bridge"
+      scheduled_stage: 0  # Stage 0: 无thinking tokens
+      action_dim: 7
+      future_action_window_size: 15
+      past_action_window_size: 0
+      shuffle_buffer_size: 100  # 小buffer，快速测试
+      image_aug: false
+      reasoning_json: "/share/project/lvjing/datas/embodied_features_bridge.json"
+      load_proprio: true
+      lower_case_instruction: true
+      train: true
+
+# 模型配置
+framework:
+  name: "QwenGR00T"
+  enable_latent_reasoning: true  # 开启（但stage 0无thinking tokens）
+  latent_reasoning:
+    compute_language_loss: true  # 测试VLM loss计算
+    vlm_loss_weight: 0.1
+    thinking_token: "<|thinking|>"
+    start_of_thinking_token: "<|start_of_thinking|>"
+    end_of_thinking_token: "<|end_of_thinking|>"
+  qwenvl:
+    base_vlm: "Qwen/Qwen3-VL-2B-Instruct"
+    attn_implementation: "sdpa"
+    cache_dir: "./qwen_cache"
+    model_max_length: 4096  # 减小以加快测试
+  action_model:
+    action_model_type: DiT-B
+    hidden_size: 1024  # 和 DiT 最后的 projection 对应，用于 ActionDecoder
+    add_pos_embed: true
+    max_seq_len: 1024
+    action_dim: 7
+    state_dim: 8  # Bridge dataset has 8-dim state (original config uses 7 for OXE)
+    future_action_window_size: 15
+    action_horizon: 16
+    past_action_window_size: 0
+    # Note: repeated_diffusion_steps is in trainer section, not here
+    noise_beta_alpha: 1.5
+    noise_beta_beta: 1.0
+    noise_s: 0.999
+    num_timestep_buckets: 1000
+    num_inference_timesteps: 4
+    num_target_vision_tokens: 32
+    diffusion_model_cfg:    # DiT Transformers 的参数
+      cross_attention_dim: 1536  # Qwen3-VL-2B hidden size (will be auto-set in __init__)
+      dropout: 0.2
+      final_dropout: true
+      interleave_self_attention: true
+      norm_type: "ada_norm"
+      num_layers: 16
+      output_dim: 1024
+      positional_embeddings: null
+
+# 训练配置（最小化）
+trainer:
+  max_train_steps: 1000  # 只跑10步
+  gradient_accumulation_steps: 1
+  learning_rate:
+    base: 1.0e-5
+  optimizer:
+    betas: [0.9, 0.95]
+    weight_decay: 0.01
+    eps: 1.0e-8
+  lr_scheduler_type: "constant"
+  num_warmup_steps: 0
+  scheduler_specific_kwargs:
+    min_lr: 1.0e-6
+  gradient_clipping: 1.0
+  logging_frequency: 1  # 每步都log
+  save_interval: 1000  # 不保存
+  eval_interval: 1000  # 不eval
+  repeated_diffusion_steps: 2  # 减少diffusion steps加快测试
+
+# W&B配置（可选）
+wandb_project: "test_ecot"
+wandb_entity: null
+

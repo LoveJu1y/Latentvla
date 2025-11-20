@@ -53,6 +53,9 @@ def build_dataloader(cfg, dataset_py="lerobot_datasets_oxe"): # TODO now here on
             output_dir = Path(cfg.output_dir)
             vla_dataset.save_dataset_statistics(output_dir / "dataset_statistics.json")
         return vla_train_dataloader
+    elif dataset_py == "ecot_rlds":
+        from starVLA.integrations.ecot_rlds.builder import make_dataloader_ecot
+        return make_dataloader_ecot(cfg)
     elif dataset_py == "vlm_datasets":
         vlm_data_module = make_vlm_dataloader(cfg)
         vlm_train_dataloader = vlm_data_module["train_dataloader"]

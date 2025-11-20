@@ -25,7 +25,7 @@ if __name__ == "__main__":
     os.environ["DISPLAY"] = ""
     # prevent a single jax process from taking up all the GPU memory
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-    import debugpy 
+    # import debugpy 
     # if os.environ.get("DEBUG", None):
 
     #     debugpy.listen(("0.0.0.0", 10092))  # listen port 
@@ -37,7 +37,10 @@ if __name__ == "__main__":
         policy_setup=args.policy_setup,
         port=args.port,
         action_scale=args.action_scale,
-        cfg_scale=1.5                  # cfg from 1.5 to 7 also performs well
+        cfg_scale=1.5,                 # cfg from 1.5 to 7 also performs well
+        enable_latent_reasoning=args.enable_latent_reasoning,
+        thinking_token_count=args.thinking_token_count
+        # action_ensemble=False,         # 禁用 action ensemble
     )
 
     # policy model creation; update this if you are using a new policy model

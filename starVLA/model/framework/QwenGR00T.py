@@ -85,19 +85,50 @@ class Qwen_GR00T(baseframework):
         state = [example["state"] for example in examples] if "state" in examples[0] else None  # [B, 1, state_dim]
         
 
-        # Step 1: QWenVL input format
-        qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            qwenvl_outputs = self.qwen_vl_interface(
-                **qwen_inputs,
-                output_attentions=False,
-                output_hidden_states=True,
-                return_dict=True,
+        # Step 1: QWenVL input format (tokenization and thinking token alignment if enabled)
+        qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(
+            images=batch_images, 
+            instructions=instructions
+        )
+        
+        # Check if iterative implicit reasoning is enabled
+        enable_latent_reasoning = self.config.framework.get("enable_latent_reasoning", False)
+        use_iterative_forward = enable_latent_reasoning and hasattr(self.qwen_vl_interface, 'forward_latent')
+        
+        # Debug logging
+        logger.info(f"[QwenGR00T.forward] enable_latent_reasoning={enable_latent_reasoning}, "
+                   f"hasattr(forward_latent)={hasattr(self.qwen_vl_interface, 'forward_latent')}, "
+                   f"use_iterative_forward={use_iterative_forward}")
+        
+        if use_iterative_forward:
+            # Step 2: Iterative forward with KV-Cache for implicit reasoning
+            logger.info("[QwenGR00T.forward] Calling forward_latent...")
+            vlm_outputs = self.qwen_vl_interface.forward_latent(
+                input_ids=qwen_inputs["input_ids"],
+                attention_mask=qwen_inputs["attention_mask"],
+                pixel_values=qwen_inputs.get("pixel_values"),
+                image_grid_thw=qwen_inputs.get("image_grid_thw"),
+                labels=qwen_inputs.get("labels"),  # May contain masked labels
+                position_ids=qwen_inputs.get("position_ids"),
             )
-            # last_hidden_state: [B, seq_len, H]
-            last_hidden = qwenvl_outputs.hidden_states[-1]   # [B, L, H]
+            
+            last_hidden = vlm_outputs['hidden_states']  # [B, L, H]
+            vlm_loss = vlm_outputs.get('loss')  # May be None if no labels
+            logger.info(f"[QwenGR00T.forward] forward_latent completed, num_passes={vlm_outputs.get('num_reasoning_passes', 'unknown')}")
+        else:
+            # Step 2: Normal forward pass (no iterative reasoning)
+            logger.info("[QwenGR00T.forward] Using normal forward (not forward_latent)")
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                qwenvl_outputs = self.qwen_vl_interface(
+                    **qwen_inputs,
+                    output_attentions=False,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+                last_hidden = qwenvl_outputs.hidden_states[-1]   # [B, L, H]
+                vlm_loss = qwenvl_outputs.loss if hasattr(qwenvl_outputs, 'loss') else None
 
-        # Step 4: Action Expert Forward and Loss
+        # Step 3: Action Expert Forward and Loss
         with torch.autocast("cuda", dtype=torch.float32):
             # 标签对齐：取最后 chunk_len 段
             actions = torch.tensor(
@@ -115,14 +146,28 @@ class Qwen_GR00T(baseframework):
             if state is not None:
                 state = torch.tensor(
                     np.array(state), device=last_hidden.device, dtype=last_hidden.dtype
-                )
-                state_repeated = state.repeat(repeated_diffusion_steps, 1, 1)
+                )  # [B, state_dim] or [B, 1, state_dim]
+                
+                # Ensure state is 3D: [B, 1, state_dim]
+                if state.ndim == 2:
+                    state = state.unsqueeze(1)  # [B, state_dim] -> [B, 1, state_dim]
+                
+                state_repeated = state.repeat(repeated_diffusion_steps, 1, 1)  # [B*repeated_diffusion_steps, 1, state_dim]
 
             action_loss = self.action_model(last_hidden_repeated, actions_target_repeated, state_repeated)  # (B, chunk_len, action_dim)
 
+        # Step 4: Combine losses
+        result = {"action_loss": action_loss}
+        
+        # Add VLM loss if available and enabled
+        if vlm_loss is not None:
+            vlm_loss_weight = self.config.framework.get("latent_reasoning", {}).get("vlm_loss_weight", 0.1)
+            result["vlm_loss"] = vlm_loss
+            result["total_loss"] = action_loss + vlm_loss_weight * vlm_loss
+        else:
+            result["total_loss"] = action_loss
 
-
-        return {"action_loss": action_loss}
+        return result
 
     @torch.inference_mode()
     def predict_action(
@@ -130,6 +175,7 @@ class Qwen_GR00T(baseframework):
         batch_images: List[List[Image.Image]],  # Batch of PIL Image list as [view1, view2]
         instructions: List[str],
         state: Optional[np.ndarray] = None,
+        use_iterative_forward: bool = False,  # ECOT: Enable forward_latent for implicit reasoning
         **kwargs: str,
     ) -> np.ndarray:
         """
@@ -138,19 +184,22 @@ class Qwen_GR00T(baseframework):
         Steps:
           1. Resize images to training resolution (if specified)
           2. Encode with QwenVL (hidden states retained)
-          6. Return normalized action trajectory
+             - If use_iterative_forward=True: Use forward_latent for implicit reasoning (ECOT)
+             - Otherwise: Use normal forward pass (Baseline)
+          3. Action model prediction from hidden states
+          4. Return normalized action trajectory
 
         Args:
             batch_images: List of samples; each sample is List[PIL.Image] (multi-view).
             instructions: List[str] natural language task instructions.
-            cfg_scale: >1 enables classifier-free guidance (scales conditional vs unconditional).
-            use_ddim: Whether to use DDIM deterministic sampling.
-            num_ddim_steps: Number of DDIM steps if enabled.
+            state: Optional proprioceptive state.
+            use_iterative_forward: If True, use forward_latent for ECOT implicit reasoning.
+                                   This enables multi-pass forward with thinking token embeddings.
             **kwargs: Reserved.
 
         Returns:
             dict:
-                normalized_actions (np.ndarray): Shape [B, T, action_dim], diffusion-sampled normalized actions.
+                normalized_actions (np.ndarray): Shape [B, T, action_dim], predicted normalized actions.
         """
         train_obs_image_size = getattr(self.config.datasets.vla_data, "image_size", None)
         if train_obs_image_size:
@@ -158,15 +207,36 @@ class Qwen_GR00T(baseframework):
     
         # Step 1: QWenVL input format
         qwen_inputs = self.qwen_vl_interface.build_qwenvl_inputs(images=batch_images, instructions=instructions)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            qwenvl_outputs = self.qwen_vl_interface(
-                **qwen_inputs,
-                output_attentions=False,
-                output_hidden_states=True,
-                return_dict=True,
-            )
-            # last_hidden_state: [B, seq_len, H]
-            last_hidden = qwenvl_outputs.hidden_states[-1]   # [B, L, H]
+        
+        # Step 2: Choose forward method based on use_iterative_forward flag
+        if use_iterative_forward and hasattr(self.qwen_vl_interface, 'forward_latent'):
+            # ECOT mode: Use forward_latent for implicit reasoning with thinking tokens
+            # This performs multiple forward passes with KV-Cache and dynamic embedding updates
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                vlm_outputs = self.qwen_vl_interface.forward_latent(
+                    input_ids=qwen_inputs["input_ids"],
+                    attention_mask=qwen_inputs["attention_mask"],
+                    pixel_values=qwen_inputs.get("pixel_values"),
+                    image_grid_thw=qwen_inputs.get("image_grid_thw"),
+                )
+                # forward_latent returns a dict with 'hidden_states', 'num_reasoning_passes', etc.
+                last_hidden = vlm_outputs['hidden_states']  # [B, L, H]
+                
+                # Optional: Log reasoning passes for debugging
+                num_passes = vlm_outputs.get('num_reasoning_passes', 0)
+                if num_passes > 0:
+                    logger.info(f"[ECOT] Completed {num_passes} reasoning passes in predict_action")
+        else:
+            # Baseline mode: Normal forward pass (no iterative reasoning)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                qwenvl_outputs = self.qwen_vl_interface(
+                    **qwen_inputs,
+                    output_attentions=False,
+                    output_hidden_states=True,
+                    return_dict=True,
+                )
+                # last_hidden_state: [B, seq_len, H]
+                last_hidden = qwenvl_outputs.hidden_states[-1]   # [B, L, H]
 
         state = torch.from_numpy(np.array(state)).to(last_hidden.device, dtype=last_hidden.dtype) if state is not None else None
         # Step 4: Action Expert Forward and Loss
