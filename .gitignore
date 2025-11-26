@@ -8,7 +8,11 @@ coconut/
 *_logs_*/
 *_logs_semble*/
 *_logs_nosemble*/
-
+*_train_*/
+*train_*/
+stage0/
+5stages/
+*_pytorch_*/
 # Output folders (training outputs and checkpoints)
 outputs/
 outputs2/

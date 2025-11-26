@@ -69,6 +69,21 @@ class Qwen_GR00T(baseframework):
         self.past_action_window_size = config.framework.action_model.past_action_window_size
         self.chunk_len = self.past_action_window_size + 1 + self.future_action_window_size
         
+        # Training stage control: "reasoning_only", "action_only", or "full"
+        self.training_stage = config.framework.get("training_stage", "full")
+        
+        # Apply parameter freezing based on training stage
+        if self.training_stage == "reasoning_only":
+            print(f"🔒 [Training Stage] reasoning_only mode - Freezing action_model parameters")
+            for param in self.action_model.parameters():
+                param.requires_grad = False
+        elif self.training_stage == "action_only":
+            print(f"🔒 [Training Stage] action_only mode - Freezing VLM parameters")
+            for param in self.qwen_vl_interface.parameters():
+                param.requires_grad = False
+        else:
+            print(f"🔓 [Training Stage] full mode - All parameters trainable")
+        
 
     def forward(
         self,
@@ -95,14 +110,8 @@ class Qwen_GR00T(baseframework):
         enable_latent_reasoning = self.config.framework.get("enable_latent_reasoning", False)
         use_iterative_forward = enable_latent_reasoning and hasattr(self.qwen_vl_interface, 'forward_latent')
         
-        # Debug logging
-        logger.info(f"[QwenGR00T.forward] enable_latent_reasoning={enable_latent_reasoning}, "
-                   f"hasattr(forward_latent)={hasattr(self.qwen_vl_interface, 'forward_latent')}, "
-                   f"use_iterative_forward={use_iterative_forward}")
-        
         if use_iterative_forward:
             # Step 2: Iterative forward with KV-Cache for implicit reasoning
-            logger.info("[QwenGR00T.forward] Calling forward_latent...")
             vlm_outputs = self.qwen_vl_interface.forward_latent(
                 input_ids=qwen_inputs["input_ids"],
                 attention_mask=qwen_inputs["attention_mask"],
@@ -114,10 +123,8 @@ class Qwen_GR00T(baseframework):
             
             last_hidden = vlm_outputs['hidden_states']  # [B, L, H]
             vlm_loss = vlm_outputs.get('loss')  # May be None if no labels
-            logger.info(f"[QwenGR00T.forward] forward_latent completed, num_passes={vlm_outputs.get('num_reasoning_passes', 'unknown')}")
         else:
             # Step 2: Normal forward pass (no iterative reasoning)
-            logger.info("[QwenGR00T.forward] Using normal forward (not forward_latent)")
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 qwenvl_outputs = self.qwen_vl_interface(
                     **qwen_inputs,
@@ -128,7 +135,22 @@ class Qwen_GR00T(baseframework):
                 last_hidden = qwenvl_outputs.hidden_states[-1]   # [B, L, H]
                 vlm_loss = qwenvl_outputs.loss if hasattr(qwenvl_outputs, 'loss') else None
 
-        # Step 3: Action Expert Forward and Loss
+        # Step 3: Compute losses based on training stage
+        result = {}
+        
+        if self.training_stage == "reasoning_only":
+            # Stage 1: Only train VLM reasoning, skip action head
+            if vlm_loss is None:
+                raise ValueError(
+                    "training_stage='reasoning_only' requires VLM loss, but vlm_loss is None. "
+                    "Please ensure enable_latent_reasoning=True and labels are provided."
+                )
+            result["vlm_loss"] = vlm_loss
+            result["total_loss"] = vlm_loss
+            return result
+
+        elif self.training_stage == "action_only":
+            # action_only mode: Only train action head, VLM is frozen
         with torch.autocast("cuda", dtype=torch.float32):
             # 标签对齐：取最后 chunk_len 段
             actions = torch.tensor(
@@ -154,12 +176,46 @@ class Qwen_GR00T(baseframework):
                 
                 state_repeated = state.repeat(repeated_diffusion_steps, 1, 1)  # [B*repeated_diffusion_steps, 1, state_dim]
 
-            action_loss = self.action_model(last_hidden_repeated, actions_target_repeated, state_repeated)  # (B, chunk_len, action_dim)
+                action_loss = self.action_model(last_hidden_repeated, actions_target_repeated, state_repeated)
 
-        # Step 4: Combine losses
-        result = {"action_loss": action_loss}
-        
-        # Add VLM loss if available and enabled
+            result["action_loss"] = action_loss
+            result["total_loss"] = action_loss  # Only action loss
+            if vlm_loss is not None:
+                result["vlm_loss"] = vlm_loss
+            return result
+            
+        else:
+            # full mode: Train both VLM and action head
+            with torch.autocast("cuda", dtype=torch.float32):
+                # 标签对齐：取最后 chunk_len 段
+                actions = torch.tensor(
+                    np.array(actions), device=last_hidden.device, dtype=last_hidden.dtype
+                )  # [B, T_full, action_dim]
+                actions_target = actions[:, -(self.future_action_window_size+1):, :]  # (B, chunk_len, action_dim)
+
+                repeated_diffusion_steps = (
+                    self.config.trainer.get("repeated_diffusion_steps", 4) if self.config and self.config.trainer else 4
+                )
+                actions_target_repeated = actions_target.repeat(repeated_diffusion_steps, 1, 1)
+                last_hidden_repeated = last_hidden.repeat(repeated_diffusion_steps, 1, 1)
+                
+                state_repeated = None
+                if state is not None:
+                    state = torch.tensor(
+                        np.array(state), device=last_hidden.device, dtype=last_hidden.dtype
+                    )  # [B, state_dim] or [B, 1, state_dim]
+                    
+                    # Ensure state is 3D: [B, 1, state_dim]
+                    if state.ndim == 2:
+                        state = state.unsqueeze(1)  # [B, state_dim] -> [B, 1, state_dim]
+                    
+                    state_repeated = state.repeat(repeated_diffusion_steps, 1, 1)  # [B*repeated_diffusion_steps, 1, state_dim]
+
+                action_loss = self.action_model(last_hidden_repeated, actions_target_repeated, state_repeated)
+
+            result["action_loss"] = action_loss
+            
+            # Combine with VLM loss if available
         if vlm_loss is not None:
             vlm_loss_weight = self.config.framework.get("latent_reasoning", {}).get("vlm_loss_weight", 0.1)
             result["vlm_loss"] = vlm_loss
@@ -228,15 +284,15 @@ class Qwen_GR00T(baseframework):
                     logger.info(f"[ECOT] Completed {num_passes} reasoning passes in predict_action")
         else:
             # Baseline mode: Normal forward pass (no iterative reasoning)
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                qwenvl_outputs = self.qwen_vl_interface(
-                    **qwen_inputs,
-                    output_attentions=False,
-                    output_hidden_states=True,
-                    return_dict=True,
-                )
-                # last_hidden_state: [B, seq_len, H]
-                last_hidden = qwenvl_outputs.hidden_states[-1]   # [B, L, H]
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            qwenvl_outputs = self.qwen_vl_interface(
+                **qwen_inputs,
+                output_attentions=False,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+            # last_hidden_state: [B, seq_len, H]
+            last_hidden = qwenvl_outputs.hidden_states[-1]   # [B, L, H]
 
         state = torch.from_numpy(np.array(state)).to(last_hidden.device, dtype=last_hidden.dtype) if state is not None else None
         # Step 4: Action Expert Forward and Loss

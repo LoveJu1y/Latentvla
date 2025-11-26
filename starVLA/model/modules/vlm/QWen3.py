@@ -52,7 +52,7 @@ class _QWen3_VL_Interface(nn.Module):
         super().__init__()
 
         qwenvl_config = config.framework.get("qwenvl", {})
-        model_id = qwenvl_config.get("base_vlm", "Qwen/Qwen3-VL-2B-Instruct")
+        model_id = qwenvl_config.get("base_vlm", "Qwen/Qwen3-VL-4B-Instruct")
         cache_dir = qwenvl_config.get("cache_dir", None)
 
         model = Qwen3VLForConditionalGeneration.from_pretrained(
@@ -625,6 +625,7 @@ class _QWen3_VL_Interface(nn.Module):
             if "CoT_prompt" in self.config.datasets.vla_data:
                 CoT_prompt = self.config.datasets.vla_data.get("CoT_prompt", "")
                 prompt = CoT_prompt.replace("{instruction}", instruction)
+                
             else:
                 prompt = instruction
 

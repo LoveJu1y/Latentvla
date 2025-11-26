@@ -3,15 +3,17 @@
 echo `which python`
 # Define environment
 cd .
-export star_vla_python=/share/project/lvjing/miniconda3/envs/starvla/bin/python
-export sim_python=~/miniconda3/envs/dinoact/bin/python
-export SimplerEnv_PATH=~/Projects/SimplerEnv
+export star_vla_python=/share/project/lvjing/miniconda3/envs/starVLA/bin/python
+export sim_python=/share/project/lvjing/miniconda3/envs/simpler_env/bin/python
+export SimplerEnv_PATH=/share/project/lvjing/SimplerEnv
 export PYTHONPATH=$(pwd):${PYTHONPATH}
+export HF_ENDPOINT=https://hf-mirror.com
+export HF_HOME=/share/project/lvjing/starVLA/qwen_cache
 base_port=10097
 
 
 MODEL_PATH=$1
-TSET_NUM=4 # repeat each task 4 times
+TSET_NUM=1 # repeat each task 1 times
 run_count=0
 
 if [ -z "$MODEL_PATH" ]; then
@@ -20,6 +22,10 @@ if [ -z "$MODEL_PATH" ]; then
 fi
 
 ckpt_path=${MODEL_PATH}
+
+# Create log directory in checkpoint directory
+ckpt_log_dir="$(dirname "${ckpt_path}")/eval_logs"
+mkdir -p "${ckpt_log_dir}"
 
 # Define a function to start the service
 policyserver_pids=()
@@ -112,7 +118,7 @@ for i in "${!ENV_NAMES[@]}"; do
   for ((run_idx=1; run_idx<=TSET_NUM; run_idx++)); do
     gpu_id=${CUDA_DEVICES[$((run_count % NUM_GPUS))]}
     
-    ckpt_dir=$(dirname "${ckpt_path}")
+    ckpt_dir="${ckpt_log_dir}"
     ckpt_base=$(basename "${ckpt_path}")
     ckpt_name="${ckpt_base%.*}"  # strip .pt or .bin suffix
 
@@ -166,7 +172,7 @@ for i in "${!ENV_NAMES_V2[@]}"; do
   env="${ENV_NAMES_V2[i]}"
   for ((run_idx=1; run_idx<=TSET_NUM; run_idx++)); do
     gpu_id=${CUDA_DEVICES[$(((run_count) % NUM_GPUS))]}  # Map to the GPU ID in CUDA_VISIBLE_DEVICES
-    ckpt_dir=$(dirname "${ckpt_path}")
+    ckpt_dir="${ckpt_log_dir}"
     ckpt_base=$(basename "${ckpt_path}")
     ckpt_name="${ckpt_base%.*}"
 

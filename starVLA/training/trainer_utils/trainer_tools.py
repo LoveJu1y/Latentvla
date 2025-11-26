@@ -91,16 +91,18 @@ def build_param_lr_groups(model, cfg):
         try:
             for attr in module_name.split("."):
                 module = getattr(module, attr)
-            # filter out frozen parameters
-            params = [p for p in module.parameters() if id(p) not in frozen_params]
+            # filter out frozen parameters AND parameters with requires_grad=False
+            params = [p for p in module.parameters() 
+                     if id(p) not in frozen_params and p.requires_grad]
             if params:  # only add param group if there are trainable parameters
                 param_groups.append({"params": params, "lr": lr, "name": module_name})
                 used_params.update(id(p) for p in params)
         except AttributeError:
             ReferenceError(f"⚠️ module path `{module_name}` not found in vla")
 
-    # assign base learning rate to the remaining unused parameters (exclude frozen ones)
-    other_params = [p for p in model.parameters() if id(p) not in used_params and id(p) not in frozen_params]
+    # assign base learning rate to the remaining unused parameters (exclude frozen ones and requires_grad=False)
+    other_params = [p for p in model.parameters() 
+                   if id(p) not in used_params and id(p) not in frozen_params and p.requires_grad]
     if other_params:
         param_groups.append({"params": other_params, "lr": base_lr, "name": "base"})
 
@@ -130,13 +132,15 @@ from PIL import Image
 def resize_images(images, target_size=(224, 224)):
     """
     recursively resize all images in the nested list.
+    Uses BILINEAR interpolation to match training data preprocessing.
 
     :param images: nested list of images or single image.
     :param target_size: target size (width, height) after resizing.
     :return: resized images list, keeping the original nested structure.
     """
     if isinstance(images, Image.Image):  # if it is a single PIL image
-        return images.resize(target_size)
+        # Use BILINEAR to match training preprocessing (ecot_rlds/transforms.py)
+        return images.resize(target_size, Image.BILINEAR)
     elif isinstance(images, list):  # if it is a list, recursively process each element
         return [resize_images(img, target_size) for img in images]
     else:

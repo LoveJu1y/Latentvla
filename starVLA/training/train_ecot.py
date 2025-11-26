@@ -136,11 +136,21 @@ def setup_optimizer_and_scheduler(model, cfg) -> Tuple[torch.optim.Optimizer, to
         for i, group in enumerate(optimizer.param_groups):
             logger.info(f"LR Group {group['name']}: lr={group['lr']}, num_params={len(group['params'])}")
 
+    # Determine warmup steps: use warmup_ratio if provided, otherwise use num_warmup_steps
+    if hasattr(cfg.trainer, 'warmup_ratio') and cfg.trainer.warmup_ratio > 0:
+        num_warmup_steps = int(cfg.trainer.max_train_steps * cfg.trainer.warmup_ratio)
+        if dist.is_initialized() and dist.get_rank() == 0:
+            logger.info(f"Using warmup_ratio={cfg.trainer.warmup_ratio}: num_warmup_steps={num_warmup_steps} (from {cfg.trainer.max_train_steps} total steps)")
+    else:
+        num_warmup_steps = cfg.trainer.num_warmup_steps
+        if dist.is_initialized() and dist.get_rank() == 0:
+            logger.info(f"Using num_warmup_steps={num_warmup_steps}")
+
     # initialize learning rate scheduler
     lr_scheduler = get_scheduler(
         name=cfg.trainer.lr_scheduler_type,
         optimizer=optimizer,
-        num_warmup_steps=cfg.trainer.num_warmup_steps,
+        num_warmup_steps=num_warmup_steps,
         num_training_steps=cfg.trainer.max_train_steps,
         scheduler_specific_kwargs=cfg.trainer.scheduler_specific_kwargs,  # minimum learning rate
     )
@@ -506,9 +516,11 @@ class ECOTVLATrainer(TrainerUtils):
             self.lr_scheduler.step()
 
         # Build metrics dictionary
-        metrics = {
-            "action_loss": output_dict["action_loss"].item(),
-        }
+        metrics = {}
+        
+        # Add action_loss if available (not present in reasoning_only mode)
+        if "action_loss" in output_dict and output_dict["action_loss"] is not None:
+            metrics["action_loss"] = output_dict["action_loss"].item()
         
         # Add vlm_loss if available and computed
         if "vlm_loss" in output_dict and output_dict["vlm_loss"] is not None:

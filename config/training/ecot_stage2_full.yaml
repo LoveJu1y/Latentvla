@@ -82,7 +82,15 @@ framework:
   name: "QwenGR00T"  # 框架名称（必须）
   
   # ========================================================================
-  # 3.1 隐式推理配置 (Implicit Reasoning Configuration)
+  # 3.1 训练阶段配置 (Training Stage Configuration)
+  # ========================================================================
+  training_stage: "full"  # 训练阶段模式
+                          # "reasoning_only": 只训练VLM（冻结action_model）
+                          # "action_only": 只训练action_model（冻结VLM）
+                          # "full": VLM和action_model一起训练（默认）
+  
+  # ========================================================================
+  # 3.2 隐式推理配置 (Implicit Reasoning Configuration)
   # ========================================================================
   enable_latent_reasoning: true  # 是否启用隐式推理
                                  # true: 使用 forward_latent（KV-Cache 迭代 forward）
@@ -107,7 +115,7 @@ framework:
   # 3.2 Qwen3-VL 配置 (Qwen3-VL Configuration)
   # ========================================================================
   qwenvl:
-    base_vlm: "Qwen/Qwen3-VL-2B-Instruct"  # Qwen3-VL 模型路径或 HuggingFace ID
+    base_vlm: "Qwen/Qwen3-VL-4B-Instruct"  # Qwen3-VL 模p型路径或 HuggingFace ID
     attn_implementation: "flash_attention_2"  # 注意力实现方式
                                  # "sdpa": PyTorch SDPA（推荐，兼容性好）
                                  # "flash_attention_2": Flash Attention 2（需要安装，更快）
@@ -118,7 +126,7 @@ framework:
   # ========================================================================
   action_model:
     # 模型类型
-    action_model_type: DiT-B  # Diffusion Transformer 模型类型
+    action_model_type: DiT-L  # Diffusion Transformer 模型类型
     
     # 基础参数
     hidden_size: 1024  # 隐藏层维度（与 DiT 最后的 projection 对应，用于 ActionDecoder）
@@ -165,9 +173,9 @@ trainer:
   
   # 学习率配置
   learning_rate:
-    base: 1.0e-5  # 基础学习率
+    base: 3.0e-5  # 基础学习率
     qwen_vl_interface: 1.0e-5  # Qwen3-VL 学习率（如果不同，会覆盖 base）
-    action_model: 5e-5  # Action Model 学习率（通常比 VLM 大）
+    action_model: 1.0e-4  # Action Model 学习率（通常比 VLM 大）
   
   # 学习率调度器
   lr_scheduler_type: "cosine_with_min_lr"  # 学习率调度器类型
@@ -175,7 +183,7 @@ trainer:
                                             # "cosine": 余弦退火
                                             # "cosine_with_min_lr": 带最小值的余弦退火（推荐）
                                             # "linear": 线性衰减
-  num_warmup_steps: 0  # Warmup 步数
+  # num_warmup_steps: 1000  # Warmup 步数
   scheduler_specific_kwargs:
     min_lr: 5.0e-7  # 最小学习率（用于 cosine_with_min_lr）
   
@@ -188,7 +196,7 @@ trainer:
   
   # 模型冻结（可选）
   freeze_modules: ""  # 要冻结的模块（逗号分隔，如 "qwenvl" 或 "" 表示不冻结）
-  
+  warmup_ratio: 0.1
   # Loss 权重（如果使用多任务训练）
   loss_scale:
     vla: 1.0  # VLA loss 权重
